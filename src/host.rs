@@ -43,6 +43,8 @@ pub(crate) async fn host_main() {
         }
     };
 
+    drop(search_socket);
+
     println!("client {} connected..", client_addr);
 
     let (mut reader, mut writer) = client_socket.into_split();
