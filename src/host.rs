@@ -8,6 +8,8 @@ use crate::{CONNECT_PORT, SEARCH_PORT};
 pub(crate) async fn host_main() {
     let mut search_port = SEARCH_PORT;
     let search_socket = loop {
+        println!("trying to bind to udp port {search_port}..");
+
         match UdpSocket::bind(("0.0.0.0", search_port)).await {
             Ok(socket) => break socket,
             Err(_) => (),
@@ -17,6 +19,8 @@ pub(crate) async fn host_main() {
 
     let mut connect_port = CONNECT_PORT;
     let listener = loop {
+        println!("trying to listen to tcp port {connect_port}..");
+
         match TcpListener::bind(("0.0.0.0", connect_port)).await {
             Ok(listener) => break listener,
             Err(_) => (),
