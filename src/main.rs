@@ -1,56 +1,134 @@
-use std::time::Duration;
-
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::{io, time::Duration};
 use tokio::{
-    net::{TcpStream, UdpSocket},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin},
+    net::{TcpListener, TcpStream, UdpSocket},
+    select,
     time::timeout,
 };
 
-use crate::client::client_main;
-use crate::host::host_main;
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    if let Ok(host) = find().await {
+        chat(host).await?;
+    } else {
+        host().await?;
+    }
 
-mod client;
-mod host;
-mod xo;
+    Ok(())
+}
 
 const SEARCH_PORT: u16 = 7777;
 const CONNECT_PORT: u16 = 8888;
 
-#[tokio::main]
-async fn main() {
-    match find_host().await {
-        Some(host_socket) => client_main(host_socket).await,
-        None => host_main().await,
-    }
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+enum DiscoveryMsg {
+    Ping,
+    Pong,
 }
 
-async fn find_host() -> Option<TcpStream> {
-    let search_socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+async fn find() -> io::Result<TcpStream> {
+    println!("searching for host...");
+    // make a broadcast socket
+    let broadcast_socket = UdpSocket::bind("0.0.0.0:0").await?;
+    broadcast_socket.set_broadcast(true)?;
 
-    search_socket.set_broadcast(true).ok()?;
-    let mut search_port = SEARCH_PORT;
+    // broadcast a message to all ips in the network
+    broadcast_socket
+        .send_to(
+            serde_json::to_string(&DiscoveryMsg::Ping)?.as_bytes(),
+            format!("255.255.255.255:{SEARCH_PORT}"),
+        )
+        .await?;
 
+    println!("waiting for response...");
+    let mut buf = [0; 64];
+    // wait 2 seconds for a reply from any host
+    let (_, mut host_addr) =
+        timeout(Duration::from_secs(2), broadcast_socket.recv_from(&mut buf)).await??;
+    let response: DiscoveryMsg = serde_json::from_slice(&buf)?;
+    if response == DiscoveryMsg::Pong {
+        todo!()
+    }
+    println!("host responded, trying to connect...");
+
+    // change the host port to the tcp port and try to connect
+    host_addr.set_port(CONNECT_PORT);
+    let host_socket = TcpStream::connect(host_addr).await?;
+
+    println!("connected to host");
+    Ok(host_socket)
+}
+
+async fn host() -> io::Result<()> {
+    println!("hosting a game, waiting for seaching client..");
+
+    let search_socket = UdpSocket::bind(format!("0.0.0.0:{SEARCH_PORT}")).await?;
+
+    let mut buf = [0; 64];
     loop {
-        println!("searching for a host in {search_port}..");
-
-        search_socket
-            .send_to(b"PING", ("255.255.255.255", search_port))
-            .await
-            .ok()?;
-
-        let mut buf = [0u8; 4];
-        match timeout(Duration::from_secs(1), search_socket.recv_from(&mut buf)).await {
-            Ok(Ok((_, host_addr))) => {
-                let parse_result = String::from_utf8_lossy(&mut buf).parse::<u16>();
-
-                if let Ok(connect_port) = parse_result {
-                    if let Ok(socket) = TcpStream::connect((host_addr.ip(), connect_port)).await {
-                        return Some(socket);
-                    }
-                };
-
-                search_port += 1;
-            }
-            _ => return None,
+        let (_, addr) = search_socket.recv_from(&mut buf).await?;
+        let response: DiscoveryMsg = serde_json::from_slice(&buf)?;
+        if response == DiscoveryMsg::Ping {
+            search_socket
+                .send_to(serde_json::to_string(&DiscoveryMsg::Pong)?.as_bytes(), addr)
+                .await?;
+            break;
         }
     }
+
+    println!("client found, trying to establish connection..");
+    let listener = TcpListener::bind(format!("0.0.0.0:{CONNECT_PORT}")).await?;
+
+    let (client_socket, _) = listener.accept().await?;
+
+    chat(client_socket).await?;
+
+    Ok(())
+}
+
+async fn chat(socket_stream: TcpStream) -> io::Result<()> {
+    let peer_addr = socket_stream.peer_addr()?;
+    let (reader, mut writer) = socket_stream.into_split();
+
+    let mut read_handle = tokio::spawn(async move {
+        let mut buf_reader = BufReader::new(reader);
+        let mut line = String::new();
+
+        while let Ok(n) = buf_reader.read_line(&mut line).await {
+            if n == 0 {
+                break;
+            }
+            print!("[{peer_addr}]: {line}");
+            line.clear();
+        }
+    });
+
+    let mut write_handle = tokio::spawn(async move {
+        let mut buf_reader = BufReader::new(stdin());
+        let mut line = String::new();
+
+        while let Ok(n) = buf_reader.read_line(&mut line).await {
+            if n == 0 {
+                break;
+            }
+            let Ok(_) = writer.write_all(line.as_bytes()).await else {
+                break;
+            };
+            line.clear();
+        }
+    });
+
+    select! {
+        _ = &mut read_handle => {
+            write_handle.abort();
+            write_handle.await?;
+        },
+        _ = &mut write_handle => {
+            read_handle.abort();
+            read_handle.await?;
+        },
+    }
+    Ok(())
 }
