@@ -1,3 +1,4 @@
+mod xo;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::{io, time::Duration};
@@ -8,12 +9,16 @@ use tokio::{
     time::timeout,
 };
 
+use crate::xo::XOGame;
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    if let Ok(host) = find().await {
-        chat(host).await?;
-    } else {
-        host().await?;
+    match find().await {
+        Ok(host) => chat(host).await?,
+        _ => {
+            let game = XOGame::new();
+            host(game).await?;
+        }
     }
 
     Ok(())
@@ -23,9 +28,19 @@ const SEARCH_PORT: u16 = 7777;
 const CONNECT_PORT: u16 = 8888;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-enum DiscoveryMsg {
+enum Protocol {
     Ping,
     Pong,
+    Play(u32),
+}
+
+impl TryFrom<&[u8]> for Protocol {
+    type Error = serde_json::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let s = String::from_utf8_lossy(value);
+        serde_json::from_str(&s)
+    }
 }
 
 async fn find() -> io::Result<TcpStream> {
@@ -37,18 +52,21 @@ async fn find() -> io::Result<TcpStream> {
     // broadcast a message to all ips in the network
     broadcast_socket
         .send_to(
-            serde_json::to_string(&DiscoveryMsg::Ping)?.as_bytes(),
+            serde_json::to_string(&Protocol::Ping)?.as_bytes(),
             format!("255.255.255.255:{SEARCH_PORT}"),
         )
         .await?;
 
     println!("waiting for response...");
-    let mut buf = [0; 64];
+    let mut buf = vec![];
     // wait 2 seconds for a reply from any host
-    let (_, mut host_addr) =
-        timeout(Duration::from_secs(2), broadcast_socket.recv_from(&mut buf)).await??;
-    let response: DiscoveryMsg = serde_json::from_slice(&buf)?;
-    if response == DiscoveryMsg::Pong {
+    let (_, mut host_addr) = timeout(
+        Duration::from_secs(2),
+        broadcast_socket.recv_buf_from(&mut buf),
+    )
+    .await??;
+    let response = Protocol::try_from(buf.as_slice())?;
+    if response != Protocol::Pong {
         todo!()
     }
     println!("host responded, trying to connect...");
@@ -61,18 +79,18 @@ async fn find() -> io::Result<TcpStream> {
     Ok(host_socket)
 }
 
-async fn host() -> io::Result<()> {
+async fn host(game: XOGame) -> io::Result<()> {
     println!("hosting a game, waiting for seaching client..");
 
     let search_socket = UdpSocket::bind(format!("0.0.0.0:{SEARCH_PORT}")).await?;
 
-    let mut buf = [0; 64];
+    let mut buf = vec![];
     loop {
-        let (_, addr) = search_socket.recv_from(&mut buf).await?;
-        let response: DiscoveryMsg = serde_json::from_slice(&buf)?;
-        if response == DiscoveryMsg::Ping {
+        let (_, addr) = search_socket.recv_buf_from(&mut buf).await?;
+        let response = Protocol::try_from(buf.as_slice())?;
+        if response == Protocol::Ping {
             search_socket
-                .send_to(serde_json::to_string(&DiscoveryMsg::Pong)?.as_bytes(), addr)
+                .send_to(serde_json::to_string(&Protocol::Pong)?.as_bytes(), addr)
                 .await?;
             break;
         }
