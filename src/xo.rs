@@ -1,29 +1,37 @@
 use std::fmt;
 
 use rand::{rng, seq::IndexedRandom};
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct XOGame {
     grid: [[Cell; 3]; 3],
     turn: Symbol,
     state: GameState,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 enum Cell {
     Empty,
     Symbol(Symbol),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Symbol {
     X,
     O,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum GameState {
     Playing,
     Over(Option<Symbol>),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Move {
+    x: u8,
+    y: u8,
 }
 
 impl XOGame {
@@ -37,7 +45,9 @@ impl XOGame {
         }
     }
 
-    pub fn play(&mut self, (mut x, mut y): (usize, usize)) -> Result<(), &'static str> {
+    pub fn play(&mut self, Move { x, y }: Move) -> Result<(), &'static str> {
+        let (mut x, mut y) = (x as usize, y as usize);
+
         if matches!(self.state, GameState::Over(_)) {
             return Err("The game is over!");
         }
@@ -99,6 +109,24 @@ impl XOGame {
 
     pub fn get_state(&self) -> GameState {
         self.state
+    }
+}
+
+impl TryFrom<&str> for Move {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let split: Vec<&str> = value.split_whitespace().collect();
+        let [x, y] = split.as_slice() else {
+            return Err("A move should have a row and a column (ex: \"1 2\")");
+        };
+        let (Ok(x), Ok(y)) = (x.parse(), y.parse()) else {
+            return Err("row and col should a valid int");
+        };
+        if !(1..=3).contains(&x) || !(1..=3).contains(&y) {
+            return Err("row and col should be and int between [1..3]");
+        }
+        Ok(Self { x, y })
     }
 }
 
